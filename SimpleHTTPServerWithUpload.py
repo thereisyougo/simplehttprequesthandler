@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
  
 """Simple HTTP Server With Upload.
+
 This module builds on BaseHTTPServer by implementing the standard GET
 and HEAD requests in a fairly straightforward manner.
+
 """
  
  
@@ -21,6 +23,7 @@ import mimetypes
 import re
 import json
 import subprocess
+import zipfile
 from urllib.parse import parse_qs
 from io import BytesIO
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -29,12 +32,15 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
  
     """Simple HTTP request handler with GET/HEAD/POST commands.
+
     This serves files from the current directory and any of its
     subdirectories.  The MIME type for files is determined by
     calling the .guess_type() method. And can reveive file uploaded
     by client.
+
     The GET/HEAD/POST requests are identical except that the HEAD
     request omits the actual contents of the file.
+
     """
  
     server_version = "SimpleHTTPWithUpload/" + __version__
@@ -139,57 +145,122 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
             self.copyfile(f, self.wfile)
             f.close()
 
-        
+    def getline(self, remainbytes):
+        line = self.rfile.readline()
+        remainbytes -= len(line)
+        return line, remainbytes
+
     def deal_post_data(self):
         content_type = self.headers['content-type']
         if 'boundary=' not in content_type:
             return (False, "Content-Type header doesn't contain boundary")
         boundary = content_type.split("boundary=")[1].encode()
         remainbytes = int(self.headers['content-length'])
-        line = self.rfile.readline()
-        remainbytes -= len(line)
-        if not boundary in line:
-            return (False, "Content NOT begin with boundary")
-        line = self.rfile.readline()
-        remainbytes -= len(line)
-        fn = re.findall(r'Content-Disposition.*name="file"; filename="(.*)"', line.decode())
-        if not fn:
-            return (False, "Can't find out file name...")
-        path = self.translate_path(self.path)
-        fn = os.path.join(path, fn[0])
-        line = self.rfile.readline()
-        remainbytes -= len(line)
-        line = self.rfile.readline()
-        remainbytes -= len(line)
-        try:
-            out = open(fn, 'wb')
-        except IOError:
-            return (False, "Can't create file to write, do you have permission to write?")
-                
-        preline = self.rfile.readline()
-        remainbytes -= len(preline)
+
+        fn = None
+        formdata = {}
+        skip_read = False
+
+        # while remainbytes > 0:
+        #     line, remainbytes = self.getline(remainbytes)
+        #     print("###", line)
+
+        # if True:
+        #     return True, "OK"
+
         while remainbytes > 0:
-            line = self.rfile.readline()
-            remainbytes -= len(line)
+            # boundary line
+            if not skip_read:
+                line, remainbytes = self.getline(remainbytes)
+                skip_read = False
             if boundary in line:
-                preline = preline[0:-1]
-                if preline.endswith(b'\r'):
-                    preline = preline[0:-1]
-                out.write(preline)
-                out.close()
-                return (True, "File '%s' upload success!" % fn)
-            else:
-                out.write(preline)
-                preline = line
-        return (False, "Unexpect Ends of data.")
+                # content-disposition
+                line, remainbytes = self.getline(remainbytes)
+                mc = re.search('filename="([^"]+)"', line.decode())
+                if mc:
+                    # binary file
+                    # generate filename
+                    path = self.translate_path(self.path)
+                    fn = os.path.join(path, mc.group(1))
+                    # skip content-type instruction
+                    line, remainbytes = self.getline(remainbytes)
+                    # skip blank line
+                    line, remainbytes = self.getline(remainbytes)
+
+                    try:
+                        out = open(fn, 'wb')
+                    except IOError:
+                        return (False, "Can't create file to write, do you have permission to write?")
+                    
+                    preline, remainbytes = self.getline(remainbytes)
+                    while True:
+                        line, remainbytes = self.getline(remainbytes)
+                        if boundary in line:
+                            preline = preline[0:-1]
+                            if preline.endswith(b'\r'):
+                                preline = preline[0:-1]
+                            out.write(preline)
+                            out.close()
+
+                            skip_read = True
+
+                            break
+                        else:
+                            out.write(preline)
+                            preline = line
+
+                else:
+                    # form field
+                    mc = re.search('name="([^"]+)"', line.decode())
+                    if mc:
+                        fieldname = mc.group(1)
+                        # skip blank line
+                        line, remainbytes = self.getline(remainbytes)
+                        while len(line) > 2:
+                            # skip content-type & content-length
+                            line, remainbytes = self.getline(remainbytes)
+                        # field value line
+                        valbuf = BytesIO()
+
+                        preline, remainbytes = self.getline(remainbytes)
+                        while True:
+                            line, remainbytes = self.getline(remainbytes)
+                            if boundary in line:
+                                preline = preline[0:-1]
+                                if preline.endswith(b'\r'):
+                                    preline = preline[0:-1]
+                                valbuf.write(preline)
+
+                                skip_read = True
+
+                                break
+                            else:
+                                valbuf.write(preline)
+                                preline = line
+                        formdata[fieldname] = valbuf.getvalue().decode()
+        
+        print("formdata:", formdata)
+
+        if fn and formdata.get('unzip') == '1' and zipfile.is_zipfile(fn):
+            shutil.unpack_archive(fn, path)
+            os.unlink(fn)
+
+        if fn:
+            return True, "File '%s' upload success!" % fn
+        else:
+            return False, "Unexpect Ends of data."
+
  
     def send_head(self):
         """Common code for GET and HEAD commands.
+
         This sends the response code and MIME headers.
+
         Return value is either a file object (which has to be copied
         to the outputfile by the caller unless the command was HEAD,
         and must be closed by the caller under all circumstances), or
         None, in which case the caller has nothing further to do.
+
         """
         path = self.translate_path(self.path)
         f = None
@@ -226,9 +297,11 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
  
     def list_directory(self, path):
         """Helper to produce a directory listing (absent index.html).
+
         Return value is either a file object, or None (indicating an
         error).  In either case, the headers are sent, making the
         interface the same as for send_head().
+
         """
         try:
             list = os.listdir(path)
@@ -243,8 +316,10 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         f.write(("<body>\n<h2>Directory listing for %s</h2>\n" % displaypath).encode())
         f.write(b"<hr>\n")
         f.write(b"<form ENCTYPE=\"multipart/form-data\" method=\"post\">")
-        f.write(b"<input name=\"file\" type=\"file\"/>")
-        f.write(b"<input type=\"submit\" value=\"upload\"/></form>\n")
+        f.write(b"<input name=\"file\" type=\"file\">")
+        f.write(b"<input type=\"hidden\" name=\"unzip\" value=\"0\">")
+        f.write(b"<input type=\"submit\" value=\"upload\">")
+        f.write(b"<input type=\"button\" onclick=\"decompress(event)\" value=\"upload & unzip\"/></form>\n")
         f.write("""
             <button onclick="vis()">show/hide</button>
             <div id="cmdform" style="display:none">
@@ -278,13 +353,22 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                 exec();
             }
         });
+
         function clean() {
             document.querySelector('#cmdcontent').value = '';
         }
+
         function vis() {
             let s = document.querySelector('#cmdform').style;
             s.display = s.display == 'none' ? '' : 'none';
         }
+
+        function decompress(e) {
+            e.preventDefault();
+            e.target.form.unzip.value = "1";
+            e.target.form.submit();
+        }
+
         function exec() {
             let hs = new Headers();
             hs.append('Content-Type', 'application/json');
@@ -309,6 +393,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                     console.info('error', error);
                 })
         }
+
         </script>
         """.encode())
         length = f.tell()
@@ -321,9 +406,11 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
  
     def translate_path(self, path):
         """Translate a /-separated PATH to the local filename syntax.
+
         Components that mean special things to the local file system
         (e.g. drive or directory names) are ignored.  (XXX They should
         probably be diagnosed.)
+
         """
         # abandon query parameters
         path = path.split('?',1)[0]
@@ -341,26 +428,33 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
  
     def copyfile(self, source, outputfile):
         """Copy all data between two file objects.
+
         The SOURCE argument is a file object open for reading
         (or anything with a read() method) and the DESTINATION
         argument is a file object open for writing (or
         anything with a write() method).
+
         The only reason for overriding this would be to change
         the block size or perhaps to replace newlines by CRLF
         -- note however that this the default server uses this
         to copy binary data as well.
+
         """
         shutil.copyfileobj(source, outputfile)
  
     def guess_type(self, path):
         """Guess the type of a file.
+
         Argument is a PATH (a filename).
+
         Return value is a string of the form type/subtype,
         usable for a MIME Content-type header.
+
         The default implementation looks the file's extension
         up in the table self.extensions_map, using application/octet-stream
         as a default; however it would be permissible (if
         slow) to look inside the data to make a better guess.
+
         """
  
         base, ext = posixpath.splitext(path)
