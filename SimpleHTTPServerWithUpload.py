@@ -157,7 +157,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         boundary = content_type.split("boundary=")[1].encode()
         remainbytes = int(self.headers['content-length'])
 
-        fn = None
+        filenames = []
         formdata = {}
         skip_read = False
 
@@ -181,7 +181,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                     # binary file
                     # generate filename
                     path = self.translate_path(self.path)
-                    fn = os.path.join(path, mc.group(1))
+                    fn = html.unescape(os.path.join(path, mc.group(1)))
                     # skip content-type instruction
                     line, remainbytes = self.getline(remainbytes)
                     # skip blank line
@@ -189,6 +189,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 
                     try:
                         out = open(fn, 'wb')
+                        filenames.append(fn)
                     except IOError:
                         return (False, "Can't create file to write, do you have permission to write?")
                     
@@ -241,12 +242,19 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         
         print("formdata:", formdata)
 
-        if fn and formdata.get('unzip') == '1' and zipfile.is_zipfile(fn):
-            shutil.unpack_archive(fn, path)
-            os.unlink(fn)
+        # zipfile_encode = "gbk" if 'windows' in str(self.headers['user-agent']).lower() else "utf-8"        
 
-        if fn:
-            return True, "File '%s' upload success!" % fn
+        if filenames and formdata.get('unzip') == '1':
+            for item in filenames:
+                if zipfile.is_zipfile(item):
+                    # with zipfile.ZipFile(item, mode='r', metadata_encoding=zipfile_encode) as rh:
+                    with zipfile.ZipFile(item, mode='r') as rh:
+                        rh.extractall(path)
+                    # shutil.unpack_archive(fn, path)
+                    os.unlink(item)
+
+        if filenames:
+            return True, "File '%s' upload success!" % [fn for fn in filenames]
         else:
             return False, "Unexpect Ends of data."
 
@@ -316,7 +324,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         f.write(("<body>\n<h2>Directory listing for %s</h2>\n" % displaypath).encode())
         f.write(b"<hr>\n")
         f.write(b"<form ENCTYPE=\"multipart/form-data\" method=\"post\">")
-        f.write(b"<input name=\"file\" type=\"file\">")
+        f.write(b"<input name=\"file\" type=\"file\" multiple >")
         f.write(b"<input type=\"hidden\" name=\"unzip\" value=\"0\">")
         f.write(b"<input type=\"submit\" value=\"upload\">")
         f.write(b"<input type=\"button\" onclick=\"decompress(event)\" value=\"upload & unzip\"/></form>\n")
