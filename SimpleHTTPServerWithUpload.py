@@ -335,6 +335,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                 <br>
                 <button onclick="exec()">ctrl + enter to execute</button>
                 <button onclick="clean()">reset</button>
+                <label><input type="checkbox" class="larger" onclick="popup_option(this)">show in window<label>
             </div>
         """.encode())
         f.write(b"<hr>\n<ul>\n")
@@ -355,12 +356,17 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         f.write(b"</ul>\n<hr>\n</body>\n</html>\n")
         f.write("""
         <script>
+        var sw;
         
         document.querySelector('#cmdcontent').addEventListener('keyup', function(e) {
             if (e.keyCode === 13 && e.ctrlKey) {
                 exec();
             }
         });
+
+        function popup_option(ck) {
+            localStorage.setItem('output_mode', ck.checked ? 'window' : 'console');
+        }
 
         function clean() {
             document.querySelector('#cmdcontent').value = '';
@@ -395,14 +401,44 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
                 })
                 .then(function(result) {
                     // output in developer console panel
-                    console.info(result);
+                    log(result);
                 })
                 .catch(function(error) {
-                    console.info('error', error);
+                    log('error', error);
                 })
         }
 
+        function log() {
+            if (arguments.length === 0) return;
+            let content = Array.from(arguments).join(',');
+            let mode = localStorage.getItem('output_mode');
+            if (mode && mode === 'window') {
+                if (!sw || sw.closed) {
+                    sw = window.open('','sync','menubar=no,location=no,resizable=yes,scrollbars=yes,status=no');
+                }
+                sw.document.body.innerHTML += ('<pre>' + content.replaceAll(/[<>]/g,function(m){return m==='<'?'&gt;':'&lt;'}) + '</pre><hr>');
+                sw.document.body.lastChild.scrollIntoView();
+            } else {
+                console.info(content);
+            }
+        }
+        document.addEventListener('DOMContentLoaded', function() {
+            let mode = localStorage.getItem('output_mode');
+            if (mode && mode === 'window') {
+                document.querySelector('input.larger').checked = true;
+            }
+        })
+
         </script>
+        <style>
+        input.larger {
+            transform: scale(1.5);
+            margin-top: 6px;
+            top: 2px;
+            position: relative;
+            margin-right: 0.5rem;
+        }
+        </style>
         """.encode())
         length = f.tell()
         f.seek(0)
